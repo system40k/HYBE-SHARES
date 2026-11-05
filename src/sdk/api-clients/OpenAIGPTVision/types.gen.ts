@@ -23,7 +23,7 @@
 //      },
 //      "servers": [
 //        {
-//          "url": "https://api-production.creao.ai/execute-apis/v2",
+//          "url": "",
 //          "description": "Production server"
 //        }
 //      ],
@@ -353,7 +353,7 @@
 // 
 
 export type ClientOptions = {
-    baseUrl: 'https://api-production.creao.ai/execute-apis/v2' | (string & {});
+    baseUrl: '' | (string & {});
 };
 
 /**

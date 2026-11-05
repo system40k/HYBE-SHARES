@@ -23,7 +23,7 @@
 //      },
 //      "servers": [
 //        {
-//          "url": "https://api-production.creao.ai/execute-apis/v2"
+//          "url": ""
 //        }
 //      ],
 //      "paths": {
@@ -445,7 +445,7 @@
 // 
 
 export type ClientOptions = {
-    baseUrl: 'https://api-production.creao.ai/execute-apis/v2' | (string & {});
+    baseUrl: '' | (string & {});
 };
 
 export type SearchResponse = {
