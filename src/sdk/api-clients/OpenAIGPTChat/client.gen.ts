@@ -16,5 +16,5 @@ export type CreateClientConfig<T extends ClientOptions = ClientOptions2> = (over
 
 export const client = createClient(createConfig<ClientOptions2>({
     fetch: platformRequest,
-baseUrl: 'https://api-production.creao.ai/execute-apis/v2'
+baseUrl: ''
 }));

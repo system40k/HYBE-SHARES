@@ -1,5 +1,4 @@
-import { authApi } from "@/lib/auth-integration";
-import { DataType, Direction, SimpleSelector } from "./common";
+import { DataType, Direction, MultiSelector, SimpleSelector } from "./common";
 import type {
   Page,
   Format,
@@ -18,7 +17,6 @@ import type {
   DeleteRequest,
   MGetRequest,
   MSetRequest,
-  MultiSelector,
   ListRequest,
   IncreaseCounterRequest,
   CountRankedListRequest,
@@ -35,120 +33,351 @@ import type {
   CountRankedListResponse,
 } from "./common";
 
-const BASE_URL = "https://api-production.creao.ai";
-const BASE_TIMEOUT = 30000;
+const STORAGE_KEY = "hybe_local_datastore";
 
+type Database = Record<string, Data[]>;
 
 /**
- * Client for DataStore service.
- * It uses Singleton pattern to prevent re-initialization.
+ * Browser-local data store.
+ * Records stay in this browser. The client does not call a remote API.
  */
 export class DataStoreClient {
   private static instance: DataStoreClient | null = null;
-  private host: string;
-  private timeout: number;
+  private db: Database | null = null;
 
-  private constructor(timeout: number = BASE_TIMEOUT) {
-    this.host = BASE_URL;
-    this.timeout = timeout;
+  private constructor() {
+    this.db = readDatabase();
   }
 
   /**
    * Get singleton instance of DataStoreClient.
    */
-  public static getInstance(timeout: number = BASE_TIMEOUT): DataStoreClient {
+  public static getInstance(_timeout?: number): DataStoreClient {
     if (!DataStoreClient.instance) {
-      DataStoreClient.instance = new DataStoreClient(timeout);
+      DataStoreClient.instance = new DataStoreClient();
     }
 
     return DataStoreClient.instance;
   }
 
-  private async request<T>(endpoint: string, data: unknown): Promise<T> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-
-    try {
-      const response = await authApi.post(
-        `${this.host}${endpoint}`,
-        data,
-        { signal: controller.signal }
-      );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return response.json();
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        console.error(`Request timeout after ${this.timeout} seconds`);
-        throw new Error(`Request timeout after ${this.timeout} seconds`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
+  private rows(entityId: string): Data[] {
+    const db = this.database();
+    if (!db[entityId]) {
+      db[entityId] = [];
     }
+    return db[entityId];
   }
 
-  // General operations
+  private database(): Database {
+    if (!this.db) {
+      this.db = readDatabase();
+    }
+    return this.db;
+  }
+
+  private persist(): void {
+    writeDatabase(this.database());
+  }
+
+  private replace(entityId: string, rows: Data[]): void {
+    this.database()[entityId] = rows;
+    this.persist();
+  }
+
   async all(request: AllRequest): Promise<AllResponse> {
-    return this.request<AllResponse>("/data/store/v1/all", request);
+    return { data: resultOf(this.rows(request.id).map(cloneData)) };
   }
 
   async insert(request: InsertRequest): Promise<InsertResponse> {
-    return this.request<InsertResponse>("/data/store/v1/insert", request);
+    const incoming = request.batch ?? (request.data ? [request.data] : []);
+    const created = incoming.map((item) => stamp(cloneData(item), true));
+    this.replace(request.id, [...this.rows(request.id), ...created]);
+    return { data: resultOf(created.map(cloneData)) };
   }
 
   async purge(request: PurgeRequest): Promise<PurgeResponse> {
-    return this.request<PurgeResponse>("/data/store/v1/purge", request);
+    this.replace(request.id, []);
+    return { data: resultOf([]) };
   }
 
-  // Index operations
   async get(request: GetRequest): Promise<GetResponse> {
-    return this.request<GetResponse>("/data/store/v1/get", request);
+    const matches = this.rows(request.id).filter((row) => matchesIndex(row, request.index));
+    return { data: resultOf(matches.map(cloneData)) };
   }
 
   async set(request: SetRequest): Promise<SetResponse> {
-    return this.request<SetResponse>("/data/store/v1/set", request);
+    const current = this.rows(request.id);
+    const matches = current.filter((row) => matchesIndex(row, request.index));
+    if (matches.length === 0) {
+      if (request.upsert && request.data) {
+        return this.insert({ ...request, batch: [request.data] });
+      }
+      return { data: resultOf([]) };
+    }
+
+    const updated: Data[] = [];
+    const next = current.map((row) => {
+      if (!matchesIndex(row, request.index) || !request.data) {
+        return row;
+      }
+      const merged = cloneData(request.data);
+      if (!fieldString(merged, "id")) copyField(row, merged, "id");
+      if (!fieldString(merged, "create_time")) copyField(row, merged, "create_time");
+      if (!fieldString(merged, "data_creator")) copyField(row, merged, "data_creator");
+      const stamped = stamp(merged, false);
+      updated.push(stamped);
+      return stamped;
+    });
+    this.replace(request.id, next);
+    return { data: resultOf(updated.map(cloneData)) };
   }
 
   async delete(request: DeleteRequest): Promise<DeleteResponse> {
-    return this.request<DeleteResponse>("/data/store/v1/delete", request);
+    const remaining = this.rows(request.id).filter((row) => !matchesIndex(row, request.index));
+    this.replace(request.id, remaining);
+    return { data: resultOf([]) };
   }
 
   async mGet(request: MGetRequest): Promise<MGetResponse> {
-    return this.request<MGetResponse>("/data/store/v1/mget", request);
+    const matches = request.indexes.flatMap((index) =>
+      this.rows(request.id).filter((row) => matchesIndex(row, index))
+    );
+    return { data: resultOf(matches.map(cloneData)) };
   }
 
   async mSet(request: MSetRequest): Promise<MSetResponse> {
-    return this.request<MSetResponse>("/data/store/v1/mset", request);
+    const updated: Data[] = [];
+    for (let i = 0; i < request.indexes.length; i++) {
+      const data = request.data[i];
+      if (!data) continue;
+      const response = await this.set({
+        id: request.id,
+        namespace: request.namespace,
+        name: request.name,
+        version: request.version,
+        task: request.task,
+        index: request.indexes[i],
+        data,
+        upsert: request.upsert,
+        format: request.format,
+      });
+      updated.push(...(response.data?.values ?? []));
+    }
+    return { data: resultOf(updated) };
   }
 
-  // List operations
   async list(request: ListRequest): Promise<ListResponse> {
-    return this.request<ListResponse>("/data/store/v1/list", request);
+    let rows = this.rows(request.id).filter((row) => matchesFilter(row, request.filter));
+    rows = [...rows].sort((left, right) => compareRecords(left, right, request.sort));
+    const total = rows.length;
+    const page = paginate(rows, request.paginate, total);
+    return { data: { values: page.rows.map(cloneData), page: page.page } };
   }
 
-  // Counter operations
-  async increaseCounter(
-    request: IncreaseCounterRequest
-  ): Promise<IncreaseCounterResponse> {
-    return this.request<IncreaseCounterResponse>(
-      "/data/store/v1/increase_counter",
-      request
-    );
+  async increaseCounter(request: IncreaseCounterRequest): Promise<IncreaseCounterResponse> {
+    const delta = request.delta ?? 1;
+    const current = this.rows(request.id);
+    const updated: Data[] = [];
+    const next = current.map((row) => {
+      if (!matchesIndex(row, request.index)) return row;
+      const copy = cloneData(row);
+      const target = copy.structured.find((value) => value.type === DataType.number) ?? copy.structured.find((value) => value.name === "value");
+      if (target) {
+        const currentValue = Number(ParseValue(target, DataType.number));
+        target.type = DataType.number;
+        target.number = currentValue + delta;
+      } else {
+        copy.structured.push(CreateValue(DataType.number, delta, "value"));
+      }
+      updated.push(copy);
+      return copy;
+    });
+    this.replace(request.id, next);
+    return { data: resultOf(updated.map(cloneData)) };
   }
 
-  // Ranked list operations
-  async countRankedList(
-    request: CountRankedListRequest
-  ): Promise<CountRankedListResponse> {
-    return this.request<CountRankedListResponse>(
-      "/data/store/v1/count_ranked_list",
-      request
-    );
+  async countRankedList(request: CountRankedListRequest): Promise<CountRankedListResponse> {
+    const total = this.rows(request.id).length;
+    return { data: { values: [], page: { number: 0, size: 0, total } } };
   }
+}
+
+function readDatabase(): Database {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Database;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDatabase(db: Database): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+}
+
+function cloneData(data: Data): Data {
+  return {
+    structured: data.structured.map((value) => ({
+      ...value,
+      object: value.object ? [...value.object] : [],
+      array: value.array ? [...value.array] : [],
+    })),
+    serialized: data.serialized,
+  };
+}
+
+function resultOf(values: Data[]): { values: Data[]; page: Page } {
+  return { values, page: { number: 0, size: values.length, total: values.length } };
+}
+
+function fieldString(record: Data, name: string): string {
+  const field = record.structured.find((value) => value.name === name);
+  if (!field) return "";
+  const parsed = ParseValue(field, field.type);
+  return parsed === undefined || parsed === null ? "" : String(parsed);
+}
+
+function copyField(from: Data, to: Data, name: string): void {
+  const source = from.structured.find((value) => value.name === name);
+  if (!source) return;
+  const target = to.structured.find((value) => value.name === name);
+  if (target) {
+    Object.assign(target, source);
+    return;
+  }
+  to.structured.push({ ...source, object: [...(source.object ?? [])], array: [...(source.array ?? [])] });
+}
+
+function newId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `local-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+function stamp(record: Data, creating: boolean): Data {
+  const now = String(Math.floor(Date.now() / 1000));
+  const setString = (name: string, value: string) => {
+    const existing = record.structured.find((field) => field.name === name);
+    if (existing) {
+      existing.type = DataType.string;
+      existing.string = value;
+      return;
+    }
+    record.structured.push(CreateValue(DataType.string, value, name));
+  };
+  if (!fieldString(record, "id")) setString("id", newId());
+  if (creating && !fieldString(record, "create_time")) setString("create_time", now);
+  setString("update_time", now);
+  return record;
+}
+
+function matchesIndex(record: Data, index?: Index): boolean {
+  if (!index || index.fields.length === 0) return false;
+  return index.fields.every((field, position) => {
+    const expected = index.values[position];
+    const actual = record.structured.find((value) => value.name === field);
+    if (!expected || !actual) return false;
+    return ParseValue(actual, actual.type) === ParseValue(expected, expected.type);
+  });
+}
+
+function matchesFilter(record: Data, filter?: Filter): boolean {
+  if (!filter) return true;
+  const simples = filter.simples ?? [];
+  const multiples = filter.multiples ?? [];
+  return simples.every((item) => matchSimple(record, item)) && multiples.every((item) => matchMulti(record, item));
+}
+
+function matchSimple(record: Data, filter: SimpleFilter): boolean {
+  const field = record.structured.find((value) => value.name === filter.field);
+  if (filter.symbol === SimpleSelector.exists) return Boolean(field);
+  if (filter.symbol === SimpleSelector.not_exists) return !field;
+  if (!filter.value) return false;
+  const left = field ? ParseValue(field, field.type) : undefined;
+  const right = ParseValue(filter.value, filter.value.type);
+  switch (filter.symbol) {
+    case SimpleSelector.equal:
+      return left === right;
+    case SimpleSelector.not_equal:
+    case SimpleSelector.not:
+      return left !== right;
+    case SimpleSelector.greater:
+      return Number(left) > Number(right);
+    case SimpleSelector.greater_or_equal:
+      return Number(left) >= Number(right);
+    case SimpleSelector.less:
+      return Number(left) < Number(right);
+    case SimpleSelector.less_or_equal:
+      return Number(left) <= Number(right);
+    case SimpleSelector.similar:
+    case SimpleSelector.not_similar:
+    case SimpleSelector.match:
+    case SimpleSelector.not_match: {
+      const includes = String(left ?? "").toLowerCase().includes(String(right).toLowerCase());
+      return filter.symbol === SimpleSelector.not_similar || filter.symbol === SimpleSelector.not_match ? !includes : includes;
+    }
+    case SimpleSelector.in:
+    case SimpleSelector.not_in: {
+      const included = arrayIncludes(filter.value, left);
+      return filter.symbol === SimpleSelector.not_in ? !included : included;
+    }
+    default:
+      return left === right;
+  }
+}
+
+function matchMulti(record: Data, filter: MultiFilter): boolean {
+  const results = filter.value.map((item) => matchSimple(record, item));
+  switch (filter.symbol) {
+    case MultiSelector.or:
+      return results.some(Boolean);
+    case MultiSelector.nor:
+      return results.every((item) => !item);
+    case MultiSelector.and:
+    default:
+      return results.every(Boolean);
+  }
+}
+
+function arrayIncludes(value: Value, candidate: unknown): boolean {
+  const items = value.array?.length ? value.array.map((item) => ParseValue(item, item.type)) : [];
+  return items.some((item) => item === candidate);
+}
+
+function compareRecords(left: Data, right: Data, sort?: Sort): number {
+  if (!sort) return 0;
+  for (const order of sort.orders) {
+    const leftField = left.structured.find((value) => value.name === order.field);
+    const rightField = right.structured.find((value) => value.name === order.field);
+    const leftValue = leftField ? ParseValue(leftField, leftField.type) : "";
+    const rightValue = rightField ? ParseValue(rightField, rightField.type) : "";
+    let compared = 0;
+    if (typeof leftValue === "number" && typeof rightValue === "number") {
+      compared = leftValue - rightValue;
+    } else {
+      compared = String(leftValue).localeCompare(String(rightValue));
+    }
+    if (compared !== 0) {
+      return order.symbol === Direction.descending ? -compared : compared;
+    }
+  }
+  return 0;
+}
+
+function paginate(rows: Data[], page: Page | undefined, total: number): { rows: Data[]; page: Page } {
+  if (!page || page.size <= 0) {
+    return { rows, page: { number: 0, size: rows.length, total } };
+  }
+  const start = Math.max(0, page.number) * page.size;
+  return {
+    rows: rows.slice(start, start + page.size),
+    page: { number: page.number, size: page.size, total },
+  };
 }
 
 /**

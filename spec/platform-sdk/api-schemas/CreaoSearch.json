@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "https://api-production.creao.ai/execute-apis/v2"
+      "url": ""
     }
   ],
   "paths": {
