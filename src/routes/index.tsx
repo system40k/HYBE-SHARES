@@ -207,6 +207,69 @@ export const Route = createFileRoute("/")({
   component: App,
 });
 
+const APP_VIEWS: AppView[] = [
+  "splash", "login", "register", "forgot-password", "onboarding",
+  "portfolio", "trade", "markets", "account", "stock-detail",
+  "exclusive", "education", "notifications", "transaction-history",
+  "portfolio-analytics", "leaderboard", "security-settings", "price-alerts",
+  "fan-vestor", "weverse-wallet", "nft-collectibles", "agm-voting",
+  "recurring-buys", "fandom-analytics", "sell-shares", "settlement-status",
+  "withdraw-funds",
+];
+
+const PUBLIC_VIEWS = new Set<AppView>(["splash", "login", "register", "forgot-password"]);
+
+function isAppView(value: string | null): value is AppView {
+  return !!value && APP_VIEWS.includes(value as AppView);
+}
+
+function readRequestedView(): AppView {
+  if (typeof window === "undefined") return "splash";
+  const page = new URLSearchParams(window.location.search).get("page");
+  if (!isAppView(page)) return "splash";
+  const signedIn = !!localStorage.getItem("hybe_paper_user_id");
+  if (!signedIn && !PUBLIC_VIEWS.has(page)) return "login";
+  return page;
+}
+
+function readReturnView(): AppView | null {
+  if (typeof window === "undefined") return null;
+  const page = new URLSearchParams(window.location.search).get("page");
+  const signedIn = !!localStorage.getItem("hybe_paper_user_id");
+  if (isAppView(page) && !PUBLIC_VIEWS.has(page) && !signedIn) return page;
+  return null;
+}
+
+function pageTitle(view: AppView, symbol?: string): string {
+  if (view === "stock-detail" && symbol) return `${symbol} · HYBE INSIGHT`;
+  const labels: Partial<Record<AppView, string>> = {
+    splash: "HYBE INSIGHT",
+    login: "Sign in",
+    register: "Create account",
+    "forgot-password": "Reset password",
+    portfolio: "Portfolio",
+    trade: "Trade",
+    markets: "Markets",
+    account: "Account",
+    education: "Learn",
+    "transaction-history": "Transactions",
+    "price-alerts": "Price alerts",
+  };
+  const label = labels[view];
+  return label && label !== "HYBE INSIGHT" ? `${label} · HYBE INSIGHT` : "HYBE INSIGHT";
+}
+
+function buildPageUrl(view: AppView, symbol?: string): string {
+  const url = new URL(window.location.href);
+  url.searchParams.set("page", view);
+  if (view === "stock-detail") {
+    if (symbol) url.searchParams.set("symbol", symbol);
+  } else {
+    url.searchParams.delete("symbol");
+  }
+  return `${url.pathname}${url.search}`;
+}
+
 // ============================================================================
 // TYPES & CONSTANTS
 // ============================================================================
@@ -1249,7 +1312,8 @@ function App() {
   const queryClient = useQueryClient();
 
   // App state
-  const [currentView, setCurrentView] = useState<AppView>("splash");
+  const [currentView, setCurrentView] = useState<AppView>(readRequestedView);
+  const [returnView, setReturnView] = useState<AppView | null>(readReturnView);
   const [currentUser, setCurrentUser] = useState<UserModel | null>(null);
   const [selectedStock, setSelectedStock] = useState<StockModel | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1260,6 +1324,11 @@ function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetConfirmPassword, setResetConfirmPassword] = useState("");
+  const [resetUser, setResetUser] = useState<UserModel | null>(null);
+  const [resetMessage, setResetMessage] = useState("");
 
   // Register state
   const [registerName, setRegisterName] = useState("");
@@ -1302,7 +1371,14 @@ function App() {
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
 
   // Price alerts state
-  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([]);
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => {
+    try {
+      const saved = localStorage.getItem("hybe_price_alerts");
+      return saved ? JSON.parse(saved) as PriceAlert[] : [];
+    } catch {
+      return [];
+    }
+  });
   const [newAlertPrice, setNewAlertPrice] = useState("");
   const [newAlertCondition, setNewAlertCondition] = useState<"above" | "below">("above");
   const [showAlertDialog, setShowAlertDialog] = useState(false);
@@ -1473,7 +1549,10 @@ function App() {
           const users = await userOrm.getUserById(savedUserId);
           if (users.length > 0) {
             setCurrentUser(users[0]);
-            setCurrentView("portfolio");
+            const requested = new URLSearchParams(window.location.search).get("page");
+            if (!isAppView(requested) || PUBLIC_VIEWS.has(requested)) {
+              setCurrentView("portfolio");
+            }
           }
         }
 
@@ -1488,6 +1567,55 @@ function App() {
 
     initializeApp();
   }, [isInitialized, queryClient, refetchStocks]);
+
+  useEffect(() => {
+    localStorage.setItem("hybe_price_alerts", JSON.stringify(priceAlerts));
+  }, [priceAlerts]);
+
+  useEffect(() => {
+    const symbol = currentView === "stock-detail" ? selectedStock?.symbol : undefined;
+    const nextUrl = buildPageUrl(currentView, symbol);
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    if (currentUrl !== nextUrl) {
+      const hasPage = new URLSearchParams(window.location.search).has("page");
+      const state = { page: currentView };
+      if (hasPage) window.history.pushState(state, "", nextUrl);
+      else window.history.replaceState(state, "", nextUrl);
+    }
+    document.title = pageTitle(currentView, symbol);
+  }, [currentView, selectedStock?.symbol]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const page = params.get("page");
+      const signedIn = !!localStorage.getItem("hybe_paper_user_id");
+      if (!isAppView(page)) {
+        setCurrentView("splash");
+        return;
+      }
+      if (!signedIn && !PUBLIC_VIEWS.has(page)) {
+        setCurrentView("login");
+        return;
+      }
+      setCurrentView(page);
+      const symbol = params.get("symbol");
+      if (symbol) {
+        const stock = stocks.find((item) => item.symbol === symbol);
+        if (stock) setSelectedStock(stock);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [stocks]);
+
+  useEffect(() => {
+    if (currentView !== "stock-detail" || selectedStock) return;
+    const symbol = new URLSearchParams(window.location.search).get("symbol");
+    if (!symbol) return;
+    const stock = stocks.find((item) => item.symbol === symbol);
+    if (stock) setSelectedStock(stock);
+  }, [currentView, selectedStock, stocks]);
 
   // Simulate market price updates
   useEffect(() => {
@@ -1760,6 +1888,9 @@ function App() {
 
       if (!user.onboarding_completed) {
         setCurrentView("onboarding");
+      } else if (returnView) {
+        setCurrentView(returnView);
+        setReturnView(null);
       } else {
         setCurrentView("portfolio");
       }
@@ -1768,6 +1899,54 @@ function App() {
       setLoginPassword("");
     } catch (error) {
       setAuthError("Login failed. Please try again.");
+    }
+  };
+
+  const handleResetLookup = async () => {
+    setAuthError("");
+    setResetMessage("");
+    if (!resetEmail.trim()) {
+      setAuthError("Enter the email on your account");
+      return;
+    }
+    try {
+      const users = await UserORM.getInstance().getUserByEmail(resetEmail.trim());
+      if (users.length === 0) {
+        setAuthError("No account uses that email");
+        setResetUser(null);
+        return;
+      }
+      setResetUser(users[0]);
+    } catch (error) {
+      console.error("Password reset lookup failed:", error);
+      setAuthError("Could not look up that account");
+    }
+  };
+
+  const handleResetPassword = async () => {
+    setAuthError("");
+    if (!resetUser) return;
+    if (resetPassword.length < 6) {
+      setAuthError("Password must be at least 6 characters");
+      return;
+    }
+    if (resetPassword !== resetConfirmPassword) {
+      setAuthError("Passwords do not match");
+      return;
+    }
+    try {
+      await UserORM.getInstance().setUserById(resetUser.id, {
+        ...resetUser,
+        password_hash: hashPassword(resetPassword),
+      });
+      setResetPassword("");
+      setResetConfirmPassword("");
+      setResetMessage(`Password updated for ${resetUser.email}. Sign in with the new password.`);
+      setResetUser(null);
+      setLoginEmail(resetEmail.trim());
+    } catch (error) {
+      console.error("Password reset failed:", error);
+      setAuthError("Could not update the password");
     }
   };
 
@@ -3265,7 +3444,9 @@ function App() {
       </button>
 
       <h1 className="text-white text-2xl font-bold mb-2">Reset Password</h1>
-      <p className="text-gray-400 mb-8">Enter your email to receive a reset link</p>
+      <p className="text-gray-400 mb-8">
+        {resetUser ? `Choose a new password for ${resetUser.email}` : "Look up your account, then choose a new password"}
+      </p>
 
       <div className="space-y-4">
         <div>
@@ -3273,16 +3454,73 @@ function App() {
           <Input
             type="email"
             placeholder="your@email.com"
+            value={resetEmail}
+            onChange={(event) => setResetEmail(event.target.value)}
             className="bg-zinc-900 border-zinc-700 text-white"
           />
         </div>
 
-        <Button
-          className="w-full h-12 text-lg"
-          style={{ background: `linear-gradient(135deg, ${HYBE_COLORS.gradientStart}, ${HYBE_COLORS.gradientEnd})` }}
-        >
-          Send Reset Link
-        </Button>
+        {resetUser && (
+          <>
+            <div>
+              <Label className="text-white mb-2 block">New password</Label>
+              <Input
+                type="password"
+                placeholder="••••••••"
+                value={resetPassword}
+                onChange={(event) => setResetPassword(event.target.value)}
+                className="bg-zinc-900 border-zinc-700 text-white"
+              />
+            </div>
+            <div>
+              <Label className="text-white mb-2 block">Confirm new password</Label>
+              <Input
+                type="password"
+                placeholder="••••••••"
+                value={resetConfirmPassword}
+                onChange={(event) => setResetConfirmPassword(event.target.value)}
+                className="bg-zinc-900 border-zinc-700 text-white"
+              />
+            </div>
+          </>
+        )}
+
+        {authError && (
+          <div className="p-3 rounded-lg bg-red-900/30 border border-red-500/50">
+            <p className="text-red-400 text-sm">{authError}</p>
+          </div>
+        )}
+        {resetMessage && (
+          <div className="p-3 rounded-lg bg-green-900/30 border border-green-500/50">
+            <p className="text-green-400 text-sm">{resetMessage}</p>
+          </div>
+        )}
+
+        {resetUser ? (
+          <Button
+            className="w-full h-12 text-lg"
+            style={{ background: `linear-gradient(135deg, ${HYBE_COLORS.gradientStart}, ${HYBE_COLORS.gradientEnd})` }}
+            onClick={handleResetPassword}
+          >
+            Update Password
+          </Button>
+        ) : !resetMessage ? (
+          <Button
+            className="w-full h-12 text-lg"
+            style={{ background: `linear-gradient(135deg, ${HYBE_COLORS.gradientStart}, ${HYBE_COLORS.gradientEnd})` }}
+            onClick={handleResetLookup}
+          >
+            Find Account
+          </Button>
+        ) : null}
+        {resetMessage && (
+          <Button
+            className="w-full h-12 text-lg bg-zinc-900 border border-zinc-700 text-white hover:bg-zinc-800"
+            onClick={() => setCurrentView("login")}
+          >
+            Back to Sign In
+          </Button>
+        )}
       </div>
     </div>
   );
