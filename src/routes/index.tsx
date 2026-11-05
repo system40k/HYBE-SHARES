@@ -202,6 +202,7 @@ import { PriceHistoryORM } from "@/components/data/orm/orm_price_history";
 import { NotificationORM } from "@/components/data/orm/orm_notification";
 import { ExclusiveContentORM } from "@/components/data/orm/orm_exclusive_content";
 import { EducationalContentORM } from "@/components/data/orm/orm_educational_content";
+import { ensureGiveawayData, GiveawayORM, PermitStatus, type GiveawayCampaign, type GiveawayPermit } from "@/components/data/orm/orm_giveaway";
 
 export const Route = createFileRoute("/")({
   component: App,
@@ -1336,15 +1337,8 @@ function App() {
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerConfirmPassword, setRegisterConfirmPassword] = useState("");
   const [hybePermitLicense, setHybePermitLicense] = useState("");
-
-  // Valid HYBE Permit Licenses for New Year + Jin & V Celebration with user details
-  const VALID_HYBE_PERMITS: Record<string, { name: string; email: string }> = {
-    "HYBH4CEX464RW": { name: "Jennifer Wollenmann", email: "wollenmannj@yahoo.com" },
-    "HYB10250GB0680": { name: "Elisabete Magalhaes", email: "bettamagalhaes@gmail.com" },
-    "HYB59371A4C9F2": { name: "Meghana Vaishnavi", email: "vrsingh9910@gmail.com" },
-    "B07200EF6667": { name: "Radhika Verma", email: "vrsingh9910@gmail.com" },
-    "HYB07280EF6207": { name: "Aneeta Varghese", email: "aneetatheresa@gmail.com" },
-  };
+  const [campaign, setCampaign] = useState<GiveawayCampaign | null>(null);
+  const [activePermit, setActivePermit] = useState<GiveawayPermit | null>(null);
 
   // Permit validation state
   const [isValidatingPermit, setIsValidatingPermit] = useState(false);
@@ -1501,6 +1495,9 @@ function App() {
       if (isInitialized) return;
 
       try {
+        const loadedCampaign = await ensureGiveawayData();
+        setCampaign(loadedCampaign);
+
         // Check if stocks exist
         const stockOrm = StockORM.getInstance();
         const existingStocks = await stockOrm.getAllStock();
@@ -1965,16 +1962,20 @@ function App() {
       setIsValidatingPermit(true);
       setAuthError("");
 
-      // Simulate 3 second validation delay
       await new Promise(resolve => setTimeout(resolve, 3000));
 
-      if (trimmedCode in VALID_HYBE_PERMITS) {
-        const permitDetails = VALID_HYBE_PERMITS[trimmedCode];
+      const permit = await GiveawayORM.getInstance().findPermit(trimmedCode);
+      const permitLabel = campaign?.permit_label || "Permit license";
+      if (permit && permit.status === PermitStatus.available) {
+        setActivePermit(permit);
         setPermitValidated(true);
-        setRegisterName(permitDetails.name);
-        setRegisterEmail(permitDetails.email);
+        setRegisterName(permit.holder_name);
+        setRegisterEmail(permit.holder_email);
+      } else if (permit) {
+        setActivePermit(null);
+        setAuthError(`This ${permitLabel} has already been used.`);
       } else {
-        setAuthError("Invalid HYBE Permit License. Please enter a valid permit code.");
+        setAuthError(`Invalid ${permitLabel}. Please enter a valid permit code.`);
         setPermitValidated(false);
       }
 
@@ -1986,15 +1987,21 @@ function App() {
   const handleRegister = async () => {
     setAuthError("");
 
-    // Validate HYBE Permit License first (required for New Year + Jin & V celebration)
+    const permitLabel = campaign?.permit_label || "Permit license";
+    if (!campaign) {
+      setAuthError("The giveaway is still loading. Try again in a moment.");
+      return;
+    }
     if (!hybePermitLicense.trim()) {
-      setAuthError("HYBE Permit License is required for registration during the New Year + Jin & V celebration period.");
+      setAuthError(`${permitLabel} is required for registration.`);
       return;
     }
 
-    const licenseUpperCase = hybePermitLicense.trim().toUpperCase();
-    if (!(licenseUpperCase in VALID_HYBE_PERMITS)) {
-      setAuthError("Invalid HYBE Permit License. Please enter a valid permit code provided by HYBE to participate in the celebration events.");
+    const permit = await GiveawayORM.getInstance().findPermit(hybePermitLicense);
+    if (!permit || permit.status !== PermitStatus.available) {
+      setAuthError(permit ? `This ${permitLabel} has already been used.` : `Invalid ${permitLabel}.`);
+      setPermitValidated(false);
+      setActivePermit(null);
       return;
     }
 
@@ -2038,7 +2045,7 @@ function App() {
           password_hash: hashPassword(registerPassword),
           name: registerName,
           risk_profile: UserRiskProfile.Moderate,
-          virtual_balance: 10000000, // 10,000,000 KRW starting balance
+          virtual_balance: campaign.starting_balance,
           loyalty_points: 0,
           two_factor_enabled: false,
           onboarding_completed: false,
@@ -2055,6 +2062,8 @@ function App() {
       }
 
       const newUser = newUsers[0];
+      await GiveawayORM.getInstance().claimPermit(permit, newUser.id);
+      setActivePermit({ ...permit, status: PermitStatus.claimed, claimed_by: newUser.id });
       setCurrentUser(newUser);
       localStorage.setItem("hybe_paper_user_id", newUser.id);
 
@@ -2121,7 +2130,7 @@ function App() {
         user_id: currentUser.id,
         type: NotificationType.Announcement,
         title: "Welcome to HYBE Paper Trading!",
-        message: `You've received ${formatCurrency(10000000)} in virtual funds. Start trading now!`,
+        message: `You've received ${formatCurrency(campaign?.starting_balance ?? currentUser.virtual_balance)} in virtual funds. Start trading now!`,
         is_read: false,
       } as NotificationModel]);
 
@@ -2402,10 +2411,10 @@ function App() {
 
   // Leaderboard user rank (moved from renderLeaderboard to fix hooks rule)
   const userRankData = useMemo(() => {
-    if (!currentUser) return null;
+    if (!currentUser || !campaign?.starting_balance) return null;
 
     const userTotalValue = totalValue;
-    const startingBalance = 10000000;
+    const startingBalance = campaign.starting_balance;
     const userReturn = userTotalValue - startingBalance;
     const userReturnPercent = (userReturn / startingBalance) * 100;
 
@@ -2422,7 +2431,7 @@ function App() {
         ? Math.round((orders.filter(o => o.status === OrderStatus.Executed).length / orders.length) * 100)
         : 0,
     };
-  }, [currentUser, totalValue, orders]);
+  }, [currentUser, totalValue, orders, campaign]);
 
   // Security settings state (moved from renderSecuritySettings to fix hooks rule)
   const [securityShowSuccess, setSecurityShowSuccess] = useState(false);
@@ -2625,24 +2634,20 @@ function App() {
               <div className="relative z-10">
                 <div className="flex items-center justify-center gap-2 mb-2">
                   <Sparkles className="w-5 h-5 text-yellow-400 animate-pulse" />
-                  <span className="text-yellow-400 font-bold text-lg">2025 NEW YEAR CELEBRATION</span>
+                  <span className="text-yellow-400 font-bold text-lg">{campaign?.title}</span>
                   <Sparkles className="w-5 h-5 text-yellow-400 animate-pulse" />
                 </div>
                 <div className="flex items-center justify-center gap-3 mb-2">
                   <div className="flex items-center gap-1.5">
                     <Crown className="w-5 h-5 text-purple-400" />
-                    <span className="text-purple-300 font-semibold">JIN</span>
+                    <span className="text-purple-300 font-semibold">{campaign?.artists}</span>
                   </div>
-                  <span className="text-gray-500">&</span>
-                  <div className="flex items-center gap-1.5">
-                    <Crown className="w-5 h-5 text-blue-400" />
-                    <span className="text-blue-300 font-semibold">V</span>
-                  </div>
-                  <span className="text-white font-medium">Upcoming Celebrations!</span>
+                  <span className="text-white font-medium">{campaign?.tagline}</span>
                 </div>
                 <p className="text-sm text-gray-300">
                   <Lock className="w-3.5 h-3.5 inline mr-1 text-yellow-500" />
-                  Exclusive access for investors with <span className="text-yellow-400 font-semibold">HYBE Permit License</span>
+                  {campaign?.access_note}{" "}
+                  <span className="text-yellow-400 font-semibold">{campaign?.permit_label}</span>
                 </p>
               </div>
             </div>
@@ -3279,16 +3284,13 @@ function App() {
         <div className="relative z-10 text-center">
           <div className="flex items-center justify-center gap-2 mb-1">
             <Sparkles className="w-4 h-4 text-yellow-400 animate-pulse" />
-            <span className="text-yellow-400 font-bold">2025 NEW YEAR CELEBRATION</span>
+            <span className="text-yellow-400 font-bold">{campaign?.title}</span>
             <Sparkles className="w-4 h-4 text-yellow-400 animate-pulse" />
           </div>
           <div className="flex items-center justify-center gap-2 text-sm">
             <Crown className="w-4 h-4 text-purple-400" />
-            <span className="text-purple-300 font-medium">JIN</span>
-            <span className="text-gray-500">&</span>
-            <Crown className="w-4 h-4 text-blue-400" />
-            <span className="text-blue-300 font-medium">V</span>
-            <span className="text-gray-400">Upcoming Celebrations</span>
+            <span className="text-purple-300 font-medium">{campaign?.artists}</span>
+            <span className="text-gray-400">{campaign?.tagline}</span>
           </div>
         </div>
       </div>
@@ -3297,7 +3299,7 @@ function App() {
       <p className="text-gray-400 mb-1">Join as an exclusive Fan-Vestor</p>
       <p className="text-yellow-500 text-sm mb-6 flex items-center gap-1">
         <Lock className="w-3.5 h-3.5" />
-        HYBE Permit License required for registration
+        {campaign?.permit_label} required for registration
       </p>
 
       <div className="space-y-4">
@@ -3305,7 +3307,7 @@ function App() {
         <div className={`p-4 rounded-xl border ${permitValidated ? 'border-green-500/50 bg-green-900/20' : 'border-yellow-500/50 bg-yellow-900/20'}`}>
           <Label className={`${permitValidated ? 'text-green-400' : 'text-yellow-400'} mb-2 block flex items-center gap-2`}>
             <KeyRound className="w-4 h-4" />
-            HYBE Permit License *
+            {campaign?.permit_label} *
             {isValidatingPermit && (
               <Loader2 className="w-4 h-4 animate-spin text-yellow-400 ml-auto" />
             )}
@@ -3340,7 +3342,7 @@ function App() {
             </p>
           ) : (
             <p className="text-xs text-gray-400 mt-2">
-              Enter your exclusive HYBE permit license code to participate in the New Year + Jin & V celebration events.
+              {campaign?.registration_note}
             </p>
           )}
         </div>
@@ -3426,7 +3428,7 @@ function App() {
         </p>
 
         <p className="text-xs text-gray-500 text-center mt-2">
-          By creating an account, you confirm you are an authorized HYBE investor participating in the New Year and BTS Jin & V celebration events.
+          {campaign?.consent_note}
         </p>
       </div>
     </div>
@@ -3627,7 +3629,7 @@ function App() {
         </p>
         <div className="bg-zinc-900 rounded-lg p-6 mb-8 w-full max-w-xs">
           <p className="text-gray-400 text-sm mb-2">Starting Balance</p>
-          <p className="text-white text-3xl font-bold">{formatCurrency(10000000)}</p>
+          <p className="text-white text-3xl font-bold">{formatCurrency(campaign?.starting_balance ?? currentUser?.virtual_balance ?? 0)}</p>
         </div>
         <Button
           className="w-full max-w-xs h-12 text-lg"
