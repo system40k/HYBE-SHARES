@@ -1,0 +1,51 @@
+{
+  "campaign": {
+    "title": "2025 NEW YEAR CELEBRATION",
+    "artists": "JIN & V",
+    "tagline": "Upcoming Celebrations",
+    "permit_label": "HYBE Permit License",
+    "access_note": "Exclusive access for investors with a permit license",
+    "registration_note": "Enter your permit license to participate in the celebration events.",
+    "consent_note": "By creating an account, you confirm you are an authorized investor participating in this celebration.",
+    "welcome_title": "Welcome to HYBE Paper Trading!",
+    "starting_balance": 10000000,
+    "currency": "KRW"
+  },
+  "permits": [
+    {
+      "code": "HYBH4CEX464RW",
+      "holder_name": "Jennifer Wollenmann",
+      "holder_email": "wollenmannj@yahoo.com",
+      "status": "available",
+      "claimed_by": ""
+    },
+    {
+      "code": "HYB10250GB0680",
+      "holder_name": "Elisabete Magalhaes",
+      "holder_email": "bettamagalhaes@gmail.com",
+      "status": "available",
+      "claimed_by": ""
+    },
+    {
+      "code": "HYB59371A4C9F2",
+      "holder_name": "Meghana Vaishnavi",
+      "holder_email": "vrsingh9910@gmail.com",
+      "status": "available",
+      "claimed_by": ""
+    },
+    {
+      "code": "B07200EF6667",
+      "holder_name": "Radhika Verma",
+      "holder_email": "vrsingh9910@gmail.com",
+      "status": "available",
+      "claimed_by": ""
+    },
+    {
+      "code": "HYB07280EF6207",
+      "holder_name": "Aneeta Varghese",
+      "holder_email": "aneetatheresa@gmail.com",
+      "status": "available",
+      "claimed_by": ""
+    }
+  ]
+}
