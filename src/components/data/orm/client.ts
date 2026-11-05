@@ -39,15 +39,11 @@ type Database = Record<string, Data[]>;
 
 /**
  * Browser-local data store.
- * Records stay in this browser. The client does not call a remote API.
+ * Records stay in this browser. Each call reloads localStorage so one tab
+ * cannot persist a stale copy over another tab's writes.
  */
 export class DataStoreClient {
   private static instance: DataStoreClient | null = null;
-  private db: Database | null = null;
-
-  private constructor() {
-    this.db = readDatabase();
-  }
 
   /**
    * Get singleton instance of DataStoreClient.
@@ -60,53 +56,43 @@ export class DataStoreClient {
     return DataStoreClient.instance;
   }
 
-  private rows(entityId: string): Data[] {
-    const db = this.database();
-    if (!db[entityId]) {
-      db[entityId] = [];
-    }
-    return db[entityId];
+  private readRows(entityId: string): Data[] {
+    const rows = readDatabase()[entityId];
+    return Array.isArray(rows) ? rows : [];
   }
 
-  private database(): Database {
-    if (!this.db) {
-      this.db = readDatabase();
-    }
-    return this.db;
-  }
-
-  private persist(): void {
-    writeDatabase(this.database());
-  }
-
-  private replace(entityId: string, rows: Data[]): void {
-    this.database()[entityId] = rows;
-    this.persist();
+  private modify(entityId: string, update: (rows: Data[]) => Data[]): Data[] {
+    const db = readDatabase();
+    const current = Array.isArray(db[entityId]) ? db[entityId] : [];
+    const next = update(current);
+    db[entityId] = next;
+    writeDatabase(db);
+    return next;
   }
 
   async all(request: AllRequest): Promise<AllResponse> {
-    return { data: resultOf(this.rows(request.id).map(cloneData)) };
+    return { data: resultOf(this.readRows(request.id).map(cloneData)) };
   }
 
   async insert(request: InsertRequest): Promise<InsertResponse> {
     const incoming = request.batch ?? (request.data ? [request.data] : []);
     const created = incoming.map((item) => stamp(cloneData(item), true));
-    this.replace(request.id, [...this.rows(request.id), ...created]);
+    this.modify(request.id, (rows) => [...rows, ...created]);
     return { data: resultOf(created.map(cloneData)) };
   }
 
   async purge(request: PurgeRequest): Promise<PurgeResponse> {
-    this.replace(request.id, []);
+    this.modify(request.id, () => []);
     return { data: resultOf([]) };
   }
 
   async get(request: GetRequest): Promise<GetResponse> {
-    const matches = this.rows(request.id).filter((row) => matchesIndex(row, request.index));
+    const matches = this.readRows(request.id).filter((row) => matchesIndex(row, request.index));
     return { data: resultOf(matches.map(cloneData)) };
   }
 
   async set(request: SetRequest): Promise<SetResponse> {
-    const current = this.rows(request.id);
+    const current = this.readRows(request.id);
     const matches = current.filter((row) => matchesIndex(row, request.index));
     if (matches.length === 0) {
       if (request.upsert && request.data) {
@@ -116,32 +102,31 @@ export class DataStoreClient {
     }
 
     const updated: Data[] = [];
-    const next = current.map((row) => {
-      if (!matchesIndex(row, request.index) || !request.data) {
-        return row;
-      }
-      const merged = cloneData(request.data);
-      if (!fieldString(merged, "id")) copyField(row, merged, "id");
-      if (!fieldString(merged, "create_time")) copyField(row, merged, "create_time");
-      if (!fieldString(merged, "data_creator")) copyField(row, merged, "data_creator");
-      const stamped = stamp(merged, false);
-      updated.push(stamped);
-      return stamped;
-    });
-    this.replace(request.id, next);
+    this.modify(request.id, (rows) =>
+      rows.map((row) => {
+        if (!matchesIndex(row, request.index) || !request.data) {
+          return row;
+        }
+        const merged = cloneData(request.data);
+        if (!fieldString(merged, "id")) copyField(row, merged, "id");
+        if (!fieldString(merged, "create_time")) copyField(row, merged, "create_time");
+        if (!fieldString(merged, "data_creator")) copyField(row, merged, "data_creator");
+        const stamped = stamp(merged, false);
+        updated.push(stamped);
+        return stamped;
+      }),
+    );
     return { data: resultOf(updated.map(cloneData)) };
   }
 
   async delete(request: DeleteRequest): Promise<DeleteResponse> {
-    const remaining = this.rows(request.id).filter((row) => !matchesIndex(row, request.index));
-    this.replace(request.id, remaining);
+    this.modify(request.id, (rows) => rows.filter((row) => !matchesIndex(row, request.index)));
     return { data: resultOf([]) };
   }
 
   async mGet(request: MGetRequest): Promise<MGetResponse> {
-    const matches = request.indexes.flatMap((index) =>
-      this.rows(request.id).filter((row) => matchesIndex(row, index))
-    );
+    const rows = this.readRows(request.id);
+    const matches = request.indexes.flatMap((index) => rows.filter((row) => matchesIndex(row, index)));
     return { data: resultOf(matches.map(cloneData)) };
   }
 
@@ -167,7 +152,7 @@ export class DataStoreClient {
   }
 
   async list(request: ListRequest): Promise<ListResponse> {
-    let rows = this.rows(request.id).filter((row) => matchesFilter(row, request.filter));
+    let rows = this.readRows(request.id).filter((row) => matchesFilter(row, request.filter));
     rows = [...rows].sort((left, right) => compareRecords(left, right, request.sort));
     const total = rows.length;
     const page = paginate(rows, request.paginate, total);
@@ -176,28 +161,28 @@ export class DataStoreClient {
 
   async increaseCounter(request: IncreaseCounterRequest): Promise<IncreaseCounterResponse> {
     const delta = request.delta ?? 1;
-    const current = this.rows(request.id);
     const updated: Data[] = [];
-    const next = current.map((row) => {
-      if (!matchesIndex(row, request.index)) return row;
-      const copy = cloneData(row);
-      const target = copy.structured.find((value) => value.type === DataType.number) ?? copy.structured.find((value) => value.name === "value");
-      if (target) {
-        const currentValue = Number(ParseValue(target, DataType.number));
-        target.type = DataType.number;
-        target.number = currentValue + delta;
-      } else {
-        copy.structured.push(CreateValue(DataType.number, delta, "value"));
-      }
-      updated.push(copy);
-      return copy;
-    });
-    this.replace(request.id, next);
+    this.modify(request.id, (rows) =>
+      rows.map((row) => {
+        if (!matchesIndex(row, request.index)) return row;
+        const copy = cloneData(row);
+        const target = copy.structured.find((value) => value.type === DataType.number) ?? copy.structured.find((value) => value.name === "value");
+        if (target) {
+          const currentValue = Number(ParseValue(target, DataType.number));
+          target.type = DataType.number;
+          target.number = currentValue + delta;
+        } else {
+          copy.structured.push(CreateValue(DataType.number, delta, "value"));
+        }
+        updated.push(copy);
+        return copy;
+      }),
+    );
     return { data: resultOf(updated.map(cloneData)) };
   }
 
   async countRankedList(request: CountRankedListRequest): Promise<CountRankedListResponse> {
-    const total = this.rows(request.id).length;
+    const total = this.readRows(request.id).length;
     return { data: { values: [], page: { number: 0, size: 0, total } } };
   }
 }
