@@ -1,3 +1,4 @@
+import { type AppView, PUBLIC_VIEWS, buildPageSearch, readPageRequest, shouldReplaceHistory } from "@/lib/app-page";
 import { createFileRoute } from "@tanstack/react-router";
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -207,37 +208,11 @@ export const Route = createFileRoute("/")({
   component: App,
 });
 
-const APP_VIEWS: AppView[] = [
-  "splash", "login", "register", "forgot-password", "onboarding",
-  "portfolio", "trade", "markets", "account", "stock-detail",
-  "exclusive", "education", "notifications", "transaction-history",
-  "portfolio-analytics", "leaderboard", "security-settings", "price-alerts",
-  "fan-vestor", "weverse-wallet", "nft-collectibles", "agm-voting",
-  "recurring-buys", "fandom-analytics", "sell-shares", "settlement-status",
-  "withdraw-funds",
-];
-
-const PUBLIC_VIEWS = new Set<AppView>(["splash", "login", "register", "forgot-password"]);
-
-function isAppView(value: string | null): value is AppView {
-  return !!value && APP_VIEWS.includes(value as AppView);
-}
-
-function readRequestedView(): AppView {
-  if (typeof window === "undefined") return "splash";
-  const page = new URLSearchParams(window.location.search).get("page");
-  if (!isAppView(page)) return "splash";
-  const signedIn = !!localStorage.getItem("hybe_paper_user_id");
-  if (!signedIn && !PUBLIC_VIEWS.has(page)) return "login";
-  return page;
-}
-
-function readReturnView(): AppView | null {
-  if (typeof window === "undefined") return null;
-  const page = new URLSearchParams(window.location.search).get("page");
-  const signedIn = !!localStorage.getItem("hybe_paper_user_id");
-  if (isAppView(page) && !PUBLIC_VIEWS.has(page) && !signedIn) return page;
-  return null;
+function initialPageRequest() {
+  if (typeof window === "undefined") {
+    return { view: "splash" as AppView, returnView: null, symbol: null };
+  }
+  return readPageRequest(window.location.search, !!localStorage.getItem("hybe_paper_user_id"));
 }
 
 function pageTitle(view: AppView, symbol?: string): string {
@@ -259,49 +234,9 @@ function pageTitle(view: AppView, symbol?: string): string {
   return label && label !== "HYBE INSIGHT" ? `${label} · HYBE INSIGHT` : "HYBE INSIGHT";
 }
 
-function buildPageUrl(view: AppView, symbol?: string): string {
-  const url = new URL(window.location.href);
-  url.searchParams.set("page", view);
-  if (view === "stock-detail") {
-    if (symbol) url.searchParams.set("symbol", symbol);
-  } else {
-    url.searchParams.delete("symbol");
-  }
-  return `${url.pathname}${url.search}`;
-}
-
 // ============================================================================
 // TYPES & CONSTANTS
 // ============================================================================
-
-type AppView =
-  | "splash"
-  | "login"
-  | "register"
-  | "forgot-password"
-  | "onboarding"
-  | "portfolio"
-  | "trade"
-  | "markets"
-  | "account"
-  | "stock-detail"
-  | "exclusive"
-  | "education"
-  | "notifications"
-  | "transaction-history"
-  | "portfolio-analytics"
-  | "leaderboard"
-  | "security-settings"
-  | "price-alerts"
-  | "fan-vestor"
-  | "weverse-wallet"
-  | "nft-collectibles"
-  | "agm-voting"
-  | "recurring-buys"
-  | "fandom-analytics"
-  | "sell-shares"
-  | "settlement-status"
-  | "withdraw-funds";
 
 type TimeFrame = "1D" | "1W" | "1M" | "1Y" | "All";
 
@@ -1312,8 +1247,8 @@ function App() {
   const queryClient = useQueryClient();
 
   // App state
-  const [currentView, setCurrentView] = useState<AppView>(readRequestedView);
-  const [returnView, setReturnView] = useState<AppView | null>(readReturnView);
+  const [currentView, setCurrentView] = useState<AppView>(() => initialPageRequest().view);
+  const [returnView, setReturnView] = useState<AppView | null>(() => initialPageRequest().returnView);
   const [currentUser, setCurrentUser] = useState<UserModel | null>(null);
   const [selectedStock, setSelectedStock] = useState<StockModel | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1549,10 +1484,9 @@ function App() {
           const users = await userOrm.getUserById(savedUserId);
           if (users.length > 0) {
             setCurrentUser(users[0]);
-            const requested = new URLSearchParams(window.location.search).get("page");
-            if (!isAppView(requested) || PUBLIC_VIEWS.has(requested)) {
-              setCurrentView("portfolio");
-            }
+            const request = readPageRequest(window.location.search, true);
+            if (PUBLIC_VIEWS.has(request.view)) setCurrentView("portfolio");
+            else setCurrentView(request.view);
           }
         }
 
@@ -1573,35 +1507,32 @@ function App() {
   }, [priceAlerts]);
 
   useEffect(() => {
-    const symbol = currentView === "stock-detail" ? selectedStock?.symbol : undefined;
-    const nextUrl = buildPageUrl(currentView, symbol);
+    const params = new URLSearchParams(window.location.search);
+    const symbolForUrl = currentView === "stock-detail" || returnView === "stock-detail"
+      ? selectedStock?.symbol ?? params.get("symbol")
+      : null;
+    const nextSearch = buildPageSearch({ view: currentView, symbol: symbolForUrl, returnView });
     const currentUrl = `${window.location.pathname}${window.location.search}`;
+    const nextUrl = `${window.location.pathname}${nextSearch}`;
     if (currentUrl !== nextUrl) {
-      const hasPage = new URLSearchParams(window.location.search).has("page");
       const state = { page: currentView };
-      if (hasPage) window.history.pushState(state, "", nextUrl);
-      else window.history.replaceState(state, "", nextUrl);
+      if (shouldReplaceHistory(window.location.search, currentView, returnView)) {
+        window.history.replaceState(state, "", nextUrl);
+      } else {
+        window.history.pushState(state, "", nextUrl);
+      }
     }
-    document.title = pageTitle(currentView, symbol);
-  }, [currentView, selectedStock?.symbol]);
+    document.title = pageTitle(currentView, symbolForUrl ?? undefined);
+  }, [currentView, returnView, selectedStock?.symbol]);
 
   useEffect(() => {
     const onPopState = () => {
-      const params = new URLSearchParams(window.location.search);
-      const page = params.get("page");
       const signedIn = !!localStorage.getItem("hybe_paper_user_id");
-      if (!isAppView(page)) {
-        setCurrentView("splash");
-        return;
-      }
-      if (!signedIn && !PUBLIC_VIEWS.has(page)) {
-        setCurrentView("login");
-        return;
-      }
-      setCurrentView(page);
-      const symbol = params.get("symbol");
-      if (symbol) {
-        const stock = stocks.find((item) => item.symbol === symbol);
+      const request = readPageRequest(window.location.search, signedIn);
+      setReturnView(request.returnView);
+      setCurrentView(request.view);
+      if (request.symbol) {
+        const stock = stocks.find((item) => item.symbol === request.symbol);
         if (stock) setSelectedStock(stock);
       }
     };
@@ -1610,12 +1541,13 @@ function App() {
   }, [stocks]);
 
   useEffect(() => {
-    if (currentView !== "stock-detail" || selectedStock) return;
+    const wantsStock = currentView === "stock-detail" || returnView === "stock-detail";
+    if (!wantsStock || selectedStock) return;
     const symbol = new URLSearchParams(window.location.search).get("symbol");
     if (!symbol) return;
     const stock = stocks.find((item) => item.symbol === symbol);
     if (stock) setSelectedStock(stock);
-  }, [currentView, selectedStock, stocks]);
+  }, [currentView, returnView, selectedStock, stocks]);
 
   // Simulate market price updates
   useEffect(() => {
@@ -1849,6 +1781,21 @@ function App() {
   };
 
   // Handle login
+  const openSavedDestination = () => {
+    const pending = readPageRequest(window.location.search, false);
+    const destination = returnView ?? pending.returnView;
+    if (!destination) {
+      setCurrentView("portfolio");
+      return;
+    }
+    if (destination === "stock-detail" && pending.symbol) {
+      const stock = stocks.find((item) => item.symbol === pending.symbol);
+      if (stock) setSelectedStock(stock);
+    }
+    setReturnView(null);
+    setCurrentView(destination);
+  };
+
   const handleLogin = async () => {
     setAuthError("");
 
@@ -1888,11 +1835,8 @@ function App() {
 
       if (!user.onboarding_completed) {
         setCurrentView("onboarding");
-      } else if (returnView) {
-        setCurrentView(returnView);
-        setReturnView(null);
       } else {
-        setCurrentView("portfolio");
+        openSavedDestination();
       }
 
       setLoginEmail("");
@@ -2125,7 +2069,7 @@ function App() {
         is_read: false,
       } as NotificationModel]);
 
-      setCurrentView("portfolio");
+      openSavedDestination();
       queryClient.invalidateQueries();
     } catch (error) {
       console.error("Failed to complete onboarding:", error);
@@ -2136,6 +2080,7 @@ function App() {
   const handleLogout = () => {
     setCurrentUser(null);
     localStorage.removeItem("hybe_paper_user_id");
+    setReturnView(null);
     setCurrentView("splash");
   };
 
